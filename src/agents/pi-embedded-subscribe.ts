@@ -111,6 +111,7 @@ export function subscribeEmbeddedPiSession(params: {
 }) {
   const assistantTexts: string[] = [];
   const toolMetas: Array<{ toolName?: string; meta?: string }> = [];
+  const toolErrors: Array<{ toolName: string; error?: string }> = [];
   const toolMetaById = new Map<string, string | undefined>();
   const toolSummaryById = new Set<string>();
   const blockReplyBreak = params.blockReplyBreak ?? "text_end";
@@ -241,6 +242,7 @@ export function subscribeEmbeddedPiSession(params: {
   const resetForCompactionRetry = () => {
     assistantTexts.length = 0;
     toolMetas.length = 0;
+    toolErrors.length = 0;
     toolMetaById.clear();
     toolSummaryById.clear();
     deltaBuffer = "";
@@ -356,6 +358,15 @@ export function subscribeEmbeddedPiSession(params: {
         toolMetas.push({ toolName, meta });
         toolMetaById.delete(toolCallId);
         toolSummaryById.delete(toolCallId);
+
+        // Track tool errors for later surfacing if agent produces no output
+        if (isError) {
+          const errorText =
+            result && typeof result === "object" && "error" in result
+              ? String((result as { error?: unknown }).error)
+              : undefined;
+          toolErrors.push({ toolName, error: errorText });
+        }
 
         emitAgentEvent({
           runId: params.runId,
@@ -643,6 +654,7 @@ export function subscribeEmbeddedPiSession(params: {
   return {
     assistantTexts,
     toolMetas,
+    toolErrors,
     unsubscribe,
     isCompacting: () => compactionInFlight || pendingCompactionRetry > 0,
     waitForCompactionRetry: () => {

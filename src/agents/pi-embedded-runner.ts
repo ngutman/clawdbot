@@ -914,6 +914,7 @@ export async function runEmbeddedPiAgent(params: {
           const {
             assistantTexts,
             toolMetas,
+            toolErrors,
             unsubscribe,
             waitForCompactionRetry,
           } = subscription;
@@ -1141,6 +1142,17 @@ export async function runEmbeddedPiAgent(params: {
             if (!cleanedText && (!mediaUrls || mediaUrls.length === 0))
               continue;
             replyItems.push({ text: cleanedText, media: mediaUrls });
+          }
+
+          // Surface tool errors if agent produced no response
+          if (replyItems.length === 0 && toolErrors.length > 0) {
+            const hasTimeout = toolErrors.some((e) =>
+              e.error?.toLowerCase().includes("timeout"),
+            );
+            const toolErrorText = hasTimeout
+              ? "⚠️ A device didn't respond in time. Please try again."
+              : "⚠️ Something went wrong while running a tool. Please try again.";
+            replyItems.push({ text: toolErrorText, isError: true });
           }
 
           const payloads = replyItems

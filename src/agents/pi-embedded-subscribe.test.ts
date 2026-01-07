@@ -1206,4 +1206,76 @@ describe("subscribeEmbeddedPiSession", () => {
 
     expect(onToolResult).toHaveBeenCalledTimes(1);
   });
+
+  it("tracks tool errors when isError is true", () => {
+    let handler: ((evt: unknown) => void) | undefined;
+    const session: StubSession = {
+      subscribe: (fn) => {
+        handler = fn;
+        return () => {};
+      },
+    };
+
+    const subscription = subscribeEmbeddedPiSession({
+      session: session as unknown as Parameters<
+        typeof subscribeEmbeddedPiSession
+      >[0]["session"],
+      runId: "run-tool-error",
+    });
+
+    handler?.({
+      type: "tool_execution_start",
+      toolName: "node.invoke",
+      toolCallId: "tool-err-1",
+      args: { nodeId: "test-node" },
+    });
+
+    handler?.({
+      type: "tool_execution_end",
+      toolName: "node.invoke",
+      toolCallId: "tool-err-1",
+      isError: true,
+      result: { error: "UNAVAILABLE: invoke timeout" },
+    });
+
+    expect(subscription.toolErrors).toHaveLength(1);
+    expect(subscription.toolErrors[0]).toEqual({
+      toolName: "node.invoke",
+      error: "UNAVAILABLE: invoke timeout",
+    });
+  });
+
+  it("does not track successful tool executions as errors", () => {
+    let handler: ((evt: unknown) => void) | undefined;
+    const session: StubSession = {
+      subscribe: (fn) => {
+        handler = fn;
+        return () => {};
+      },
+    };
+
+    const subscription = subscribeEmbeddedPiSession({
+      session: session as unknown as Parameters<
+        typeof subscribeEmbeddedPiSession
+      >[0]["session"],
+      runId: "run-tool-success",
+    });
+
+    handler?.({
+      type: "tool_execution_start",
+      toolName: "read",
+      toolCallId: "tool-ok-1",
+      args: { path: "/tmp/test.txt" },
+    });
+
+    handler?.({
+      type: "tool_execution_end",
+      toolName: "read",
+      toolCallId: "tool-ok-1",
+      isError: false,
+      result: "file content",
+    });
+
+    expect(subscription.toolErrors).toHaveLength(0);
+  });
 });
