@@ -804,6 +804,64 @@ If you configure the same alias name (case-insensitive) yourself, your value win
 }
 ```
 
+#### `agent.contextPruning` (opt-in tool-result pruning)
+
+`agent.contextPruning` prunes **old tool results** from the in-memory context right before a request is sent to the LLM.
+It does **not** modify the session history on disk (`*.jsonl` remains complete).
+
+This is intended to reduce token usage for chatty agents that accumulate large tool outputs over time.
+
+High level:
+- Never touches user/assistant messages.
+- Protects the last `keepLastAssistants` assistant messages (no tool results after that point are pruned).
+- Soft-trims oversized tool results (keep head/tail) when the estimated context ratio crosses `softTrimRatio`.
+- Hard-clears the oldest eligible tool results when the estimated context ratio crosses `hardClearRatio` **and**
+  there’s enough prunable tool-result bulk (`minPrunableToolChars`).
+
+Notes / current limitations:
+- Tool results containing **image blocks are skipped** (never trimmed/cleared) right now.
+- The estimated “context ratio” is based on **characters** (approximate), not exact tokens.
+
+Example (minimal):
+```json5
+{
+  agent: {
+    contextPruning: {
+      enabled: true
+    }
+  }
+}
+```
+
+Defaults (when enabled):
+- `keepLastAssistants`: `3`
+- `softTrimRatio`: `0.3`
+- `hardClearRatio`: `0.5`
+- `minPrunableToolChars`: `50000`
+- `softTrim`: `{ maxChars: 4000, headChars: 1500, tailChars: 1500 }`
+- `hardClear`: `{ enabled: true, placeholder: "[Old tool result content cleared]" }`
+
+Example (tuned):
+```json5
+{
+  agent: {
+    contextPruning: {
+      enabled: true,
+      keepLastAssistants: 3,
+      softTrimRatio: 0.3,
+      hardClearRatio: 0.5,
+      minPrunableToolChars: 50000,
+      softTrim: { maxChars: 4000, headChars: 1500, tailChars: 1500 },
+      hardClear: { enabled: true, placeholder: "[Old tool result content cleared]" },
+      // Optional: restrict pruning to specific tools (deny wins; supports "*" wildcards)
+      tools: { deny: ["browser", "canvas"] },
+      // Optional: log pruning decisions into the session jsonl (entry type: "clawdbot.contextPruning")
+      log: { enabled: true, mode: "changes" }
+    }
+  }
+}
+```
+
 Block streaming:
 - `agent.blockStreamingDefault`: `"on"`/`"off"` (default on).
 - `agent.blockStreamingBreak`: `"text_end"` or `"message_end"` (default: text_end).
