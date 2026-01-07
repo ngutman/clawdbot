@@ -1,5 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type {
   AgentMessage,
@@ -40,7 +42,11 @@ import {
   markAuthProfileUsed,
 } from "./auth-profiles.js";
 import type { BashElevatedDefaults } from "./bash-tools.js";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "./defaults.js";
+import {
+  DEFAULT_CONTEXT_TOKENS,
+  DEFAULT_MODEL,
+  DEFAULT_PROVIDER,
+} from "./defaults.js";
 import {
   ensureAuthProfileStore,
   getApiKeyForModel,
@@ -81,6 +87,140 @@ import {
 import { buildAgentSystemPromptAppend } from "./system-prompt.js";
 import { normalizeUsage, type UsageLike } from "./usage.js";
 import { loadWorkspaceBootstrapFiles } from "./workspace.js";
+
+const CONTEXT_PRUNING_ENV = "CLAWDBOT_PI_CONTEXT_PRUNING";
+const CONTEXT_PRUNING_ENV_VERSION = 1;
+
+// Context pruning is implemented as a Pi extension that runs in the same Node process.
+// We pass per-session config to the extension via a process env var. The payload is keyed by
+// sessionId to avoid cross-session contamination when multiple sessions run concurrently.
+
+function resolveContextPruningExtensionPath(): string {
+  const self = fileURLToPath(import.meta.url);
+  const dir = path.dirname(self);
+  // In dev this file is `.ts` (tsx), in production it's `.js`.
+  const ext = self.endsWith(".ts") ? "ts" : "js";
+  return path.join(dir, "pi-extensions", `context-pruning.${ext}`);
+}
+
+type ContextPruningEnvPayloadV1 = {
+  v: number;
+  bySessionId: Record<
+    string,
+    { config: unknown; contextWindowTokens?: number | null }
+  >;
+};
+
+function getContextPruningEnvPayload(): ContextPruningEnvPayloadV1 {
+  const empty: ContextPruningEnvPayloadV1 = {
+    v: CONTEXT_PRUNING_ENV_VERSION,
+    bySessionId: {},
+  };
+
+  const raw = process.env[CONTEXT_PRUNING_ENV];
+  if (!raw || !raw.trim()) return empty;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return empty;
+    }
+    const v = (parsed as { v?: unknown }).v;
+    const bySessionId = (parsed as { bySessionId?: unknown }).bySessionId;
+    if (v !== CONTEXT_PRUNING_ENV_VERSION) return empty;
+    if (
+      !bySessionId ||
+      typeof bySessionId !== "object" ||
+      Array.isArray(bySessionId)
+    ) {
+      return empty;
+    }
+    return {
+      v: CONTEXT_PRUNING_ENV_VERSION,
+      bySessionId: bySessionId as ContextPruningEnvPayloadV1["bySessionId"],
+    };
+  } catch {
+    return empty;
+  }
+}
+
+function setContextPruningEnvPayload(
+  payload: ContextPruningEnvPayloadV1,
+): void {
+  if (Object.keys(payload.bySessionId).length === 0) {
+    delete process.env[CONTEXT_PRUNING_ENV];
+    return;
+  }
+  process.env[CONTEXT_PRUNING_ENV] = JSON.stringify(payload);
+}
+
+function resolveContextWindowTokens(params: {
+  cfg: ClawdbotConfig | undefined;
+  provider: string;
+  modelId: string;
+  model: Model<Api> | undefined;
+}): number {
+  const fromModel =
+    typeof params.model?.contextWindow === "number" &&
+    Number.isFinite(params.model.contextWindow) &&
+    params.model.contextWindow > 0
+      ? params.model.contextWindow
+      : undefined;
+  if (fromModel) return fromModel;
+
+  const fromModelsConfig = (() => {
+    const providers = params.cfg?.models?.providers as
+      | Record<
+          string,
+          { models?: Array<{ id?: string; contextWindow?: number }> }
+        >
+      | undefined;
+    const providerEntry = providers?.[params.provider];
+    const models = Array.isArray(providerEntry?.models)
+      ? providerEntry.models
+      : [];
+    const match = models.find((m) => m?.id === params.modelId);
+    return typeof match?.contextWindow === "number" && match.contextWindow > 0
+      ? match.contextWindow
+      : undefined;
+  })();
+  if (fromModelsConfig) return fromModelsConfig;
+
+  const fromAgentConfig =
+    typeof params.cfg?.agent?.contextTokens === "number" &&
+    Number.isFinite(params.cfg.agent.contextTokens) &&
+    params.cfg.agent.contextTokens > 0
+      ? Math.floor(params.cfg.agent.contextTokens)
+      : undefined;
+  if (fromAgentConfig) return fromAgentConfig;
+
+  return DEFAULT_CONTEXT_TOKENS;
+}
+
+function applyContextPruningConfig(params: {
+  cfg: ClawdbotConfig | undefined;
+  sessionId: string;
+  provider: string;
+  modelId: string;
+  model: Model<Api> | undefined;
+}): { additionalExtensionPaths?: string[]; cleanup?: () => void } {
+  const raw = params.cfg?.agent?.contextPruning;
+  if (raw?.enabled !== true) return {};
+  const payload = getContextPruningEnvPayload();
+  payload.bySessionId[params.sessionId] = {
+    config: raw,
+    contextWindowTokens: resolveContextWindowTokens(params),
+  };
+  setContextPruningEnvPayload(payload);
+
+  return {
+    additionalExtensionPaths: [resolveContextPruningExtensionPath()],
+    cleanup: () => {
+      const next = getContextPruningEnvPayload();
+      delete next.bySessionId[params.sessionId];
+      setContextPruningEnvPayload(next);
+    },
+  };
+}
 
 export type EmbeddedPiAgentMeta = {
   sessionId: string;
@@ -578,27 +718,42 @@ export async function compactEmbeddedPiSession(params: {
           effectiveWorkspace,
           agentDir,
         );
+        const pruning = applyContextPruningConfig({
+          cfg: params.config,
+          sessionId: params.sessionId,
+          provider,
+          modelId,
+          model,
+        });
+        const additionalExtensionPaths = pruning.additionalExtensionPaths;
 
         const { builtInTools, customTools } = splitSdkTools({
           tools,
           sandboxEnabled: !!sandbox?.enabled,
         });
 
-        const { session } = await createAgentSession({
-          cwd: resolvedWorkspace,
-          agentDir,
-          authStorage,
-          modelRegistry,
-          model,
-          thinkingLevel: mapThinkingLevel(params.thinkLevel),
-          systemPrompt,
-          tools: builtInTools,
-          customTools,
-          sessionManager,
-          settingsManager,
-          skills: promptSkills,
-          contextFiles,
-        });
+        let session: Awaited<ReturnType<typeof createAgentSession>>["session"];
+        try {
+          ({ session } = await createAgentSession({
+            cwd: resolvedWorkspace,
+            agentDir,
+            authStorage,
+            modelRegistry,
+            model,
+            thinkingLevel: mapThinkingLevel(params.thinkLevel),
+            systemPrompt,
+            tools: builtInTools,
+            customTools,
+            sessionManager,
+            settingsManager,
+            skills: promptSkills,
+            contextFiles,
+            additionalExtensionPaths,
+          }));
+        } catch (err) {
+          pruning.cleanup?.();
+          throw err;
+        }
 
         try {
           const prior = await sanitizeSessionMessagesImages(
@@ -621,6 +776,7 @@ export async function compactEmbeddedPiSession(params: {
           };
         } finally {
           session.dispose();
+          pruning.cleanup?.();
         }
       } catch (err) {
         return {
@@ -887,36 +1043,59 @@ export async function runEmbeddedPiAgent(params: {
             effectiveWorkspace,
             agentDir,
           );
+          const pruning = applyContextPruningConfig({
+            cfg: params.config,
+            sessionId: params.sessionId,
+            provider,
+            modelId,
+            model,
+          });
+          const additionalExtensionPaths = pruning.additionalExtensionPaths;
 
           const { builtInTools, customTools } = splitSdkTools({
             tools,
             sandboxEnabled: !!sandbox?.enabled,
           });
 
-          const { session } = await createAgentSession({
-            cwd: resolvedWorkspace,
-            agentDir,
-            authStorage,
-            modelRegistry,
-            model,
-            thinkingLevel,
-            systemPrompt,
-            // Built-in tools recognized by pi-coding-agent SDK
-            tools: builtInTools,
-            // Custom clawdbot tools (browser, canvas, nodes, cron, etc.)
-            customTools,
-            sessionManager,
-            settingsManager,
-            skills: promptSkills,
-            contextFiles,
-          });
+          let session: Awaited<
+            ReturnType<typeof createAgentSession>
+          >["session"];
+          try {
+            ({ session } = await createAgentSession({
+              cwd: resolvedWorkspace,
+              agentDir,
+              authStorage,
+              modelRegistry,
+              model,
+              thinkingLevel,
+              systemPrompt,
+              // Built-in tools recognized by pi-coding-agent SDK
+              tools: builtInTools,
+              // Custom clawdbot tools (browser, canvas, nodes, cron, etc.)
+              customTools,
+              sessionManager,
+              settingsManager,
+              skills: promptSkills,
+              contextFiles,
+              additionalExtensionPaths,
+            }));
+          } catch (err) {
+            pruning.cleanup?.();
+            throw err;
+          }
 
-          const prior = await sanitizeSessionMessagesImages(
-            session.messages,
-            "session:history",
-          );
-          if (prior.length > 0) {
-            session.agent.replaceMessages(prior);
+          try {
+            const prior = await sanitizeSessionMessagesImages(
+              session.messages,
+              "session:history",
+            );
+            if (prior.length > 0) {
+              session.agent.replaceMessages(prior);
+            }
+          } catch (err) {
+            session.dispose();
+            pruning.cleanup?.();
+            throw err;
           }
           let aborted = Boolean(params.abortSignal?.aborted);
           let timedOut = false;
@@ -925,21 +1104,28 @@ export async function runEmbeddedPiAgent(params: {
             if (isTimeout) timedOut = true;
             void session.abort();
           };
-          const subscription = subscribeEmbeddedPiSession({
-            session,
-            runId: params.runId,
-            verboseLevel: params.verboseLevel,
-            reasoningMode: params.reasoningLevel ?? "off",
-            shouldEmitToolResult: params.shouldEmitToolResult,
-            onToolResult: params.onToolResult,
-            onReasoningStream: params.onReasoningStream,
-            onBlockReply: params.onBlockReply,
-            blockReplyBreak: params.blockReplyBreak,
-            blockReplyChunking: params.blockReplyChunking,
-            onPartialReply: params.onPartialReply,
-            onAgentEvent: params.onAgentEvent,
-            enforceFinalTag: params.enforceFinalTag,
-          });
+          let subscription: ReturnType<typeof subscribeEmbeddedPiSession>;
+          try {
+            subscription = subscribeEmbeddedPiSession({
+              session,
+              runId: params.runId,
+              verboseLevel: params.verboseLevel,
+              reasoningMode: params.reasoningLevel ?? "off",
+              shouldEmitToolResult: params.shouldEmitToolResult,
+              onToolResult: params.onToolResult,
+              onReasoningStream: params.onReasoningStream,
+              onBlockReply: params.onBlockReply,
+              blockReplyBreak: params.blockReplyBreak,
+              blockReplyChunking: params.blockReplyChunking,
+              onPartialReply: params.onPartialReply,
+              onAgentEvent: params.onAgentEvent,
+              enforceFinalTag: params.enforceFinalTag,
+            });
+          } catch (err) {
+            session.dispose();
+            pruning.cleanup?.();
+            throw err;
+          }
           const {
             assistantTexts,
             toolMetas,
@@ -1029,6 +1215,7 @@ export async function runEmbeddedPiAgent(params: {
               notifyEmbeddedRunEnded(params.sessionId);
             }
             session.dispose();
+            pruning.cleanup?.();
             params.abortSignal?.removeEventListener?.("abort", onAbort);
           }
           if (promptError && !aborted) {

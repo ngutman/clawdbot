@@ -839,6 +839,31 @@ export type AgentModelListConfig = {
   fallbacks?: string[];
 };
 
+export type AgentContextPruningConfig = {
+  enabled?: boolean;
+  keepLastAssistants?: number;
+  softTrimRatio?: number;
+  hardClearRatio?: number;
+  minPrunableToolChars?: number;
+  tools?: {
+    allow?: string[];
+    deny?: string[];
+  };
+  log?: {
+    enabled?: boolean;
+    mode?: "changes" | "always";
+  };
+  softTrim?: {
+    maxChars?: number;
+    headChars?: number;
+    tailChars?: number;
+  };
+  hardClear?: {
+    enabled?: boolean;
+    placeholder?: string;
+  };
+};
+
 export type ClawdbotConfig = {
   auth?: AuthConfig;
   env?: {
@@ -884,6 +909,8 @@ export type ClawdbotConfig = {
     userTimezone?: string;
     /** Optional display-only context window override (used for % in status UIs). */
     contextTokens?: number;
+    /** Opt-in: prune old tool results from the LLM context to reduce token usage. */
+    contextPruning?: AgentContextPruningConfig;
     /** Default thinking level when no /think directive is present. */
     thinkingDefault?: "off" | "minimal" | "low" | "medium" | "high";
     /** Default verbose level when no /verbose directive is present. */
