@@ -2,6 +2,21 @@ import ClawdbotProtocol
 import Foundation
 
 extension ConnectionsStore {
+    private func channelStatus<T: Decodable>(
+        _ id: String,
+        as type: T.Type) -> T?
+    {
+        self.snapshot?.decodeChannel(id, as: type)
+    }
+
+    var isTelegramTokenLocked: Bool {
+        self.channelStatus("telegram", as: ChannelsStatusSnapshot.TelegramStatus.self)?.tokenSource == "env"
+    }
+
+    var isDiscordTokenLocked: Bool {
+        self.channelStatus("discord", as: ChannelsStatusSnapshot.DiscordStatus.self)?.tokenSource == "env"
+    }
+
     func loadConfig() async {
         do {
             let snap: ConfigSnapshot = try await GatewayConnection.shared.requestDecoded(
