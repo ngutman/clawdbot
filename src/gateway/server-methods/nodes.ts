@@ -13,6 +13,8 @@ import {
   validateNodeDescribeParams,
   validateNodeEventParams,
   validateNodeInvokeParams,
+  validateNodeInvokeResultAbortParams,
+  validateNodeInvokeResultChunkParams,
   validateNodeInvokeResultParams,
   validateNodeListParams,
   validateNodePairApproveParams,
@@ -30,6 +32,10 @@ import {
 } from "./nodes.helpers.js";
 import { loadConfig } from "../../config/config.js";
 import { isNodeCommandAllowed, resolveNodeCommandAllowlist } from "../node-command-policy.js";
+import {
+  resolveMaxNodeInflightBytes,
+  resolveMaxNodeInvokeResultBytes,
+} from "../server-constants.js";
 import type { GatewayRequestHandlers } from "./types.js";
 
 function isNodeEntry(entry: { role?: string; roles?: string[] }) {
@@ -452,11 +458,70 @@ export const nodeHandlers: GatewayRequestHandlers = {
       ok: boolean;
       payload?: unknown;
       payloadJSON?: string | null;
+      payloadTransfer?: {
+        format: "json";
+        encoding: "base64";
+        totalBytes: number;
+        chunkBytes: number;
+        chunkCount: number;
+        sha256: string;
+      };
       error?: { code?: string; message?: string } | null;
     };
     const callerNodeId = client?.connect?.device?.id ?? client?.connect?.client?.id;
     if (callerNodeId && callerNodeId !== p.nodeId) {
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "nodeId mismatch"));
+      return;
+    }
+    if (p.payloadTransfer) {
+      if (!p.ok) {
+        context.nodeRegistry.handleInvokeResult({
+          id: p.id,
+          nodeId: p.nodeId,
+          ok: false,
+          error: { code: "INVALID_REQUEST", message: "payloadTransfer requires ok:true" },
+        });
+        respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "payloadTransfer requires ok:true"));
+        return;
+      }
+      if (p.payload !== undefined || p.payloadJSON !== undefined) {
+        context.nodeRegistry.handleInvokeResult({
+          id: p.id,
+          nodeId: p.nodeId,
+          ok: false,
+          error: { code: "INVALID_REQUEST", message: "payloadTransfer requires empty payload" },
+        });
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, "payloadTransfer requires empty payload"),
+        );
+        return;
+      }
+      const cfg = loadConfig();
+      const maxInvokeResultBytes = resolveMaxNodeInvokeResultBytes(cfg);
+      const maxNodeInflightBytes = resolveMaxNodeInflightBytes(maxInvokeResultBytes);
+      const start = context.nodeRegistry.startInvokeResultTransfer({
+        id: p.id,
+        nodeId: p.nodeId,
+        totalBytes: p.payloadTransfer.totalBytes,
+        chunkBytes: p.payloadTransfer.chunkBytes,
+        chunkCount: p.payloadTransfer.chunkCount,
+        sha256: p.payloadTransfer.sha256,
+        maxInvokeResultBytes,
+        maxInflightBytes: maxNodeInflightBytes,
+      });
+      if (!start.ok) {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, start.message, {
+            details: { reason: start.reason },
+          }),
+        );
+        return;
+      }
+      respond(true, { ok: true }, undefined);
       return;
     }
     const ok = context.nodeRegistry.handleInvokeResult({
@@ -472,6 +537,76 @@ export const nodeHandlers: GatewayRequestHandlers = {
       // Return success instead of error to reduce log noise; client can discard.
       context.logGateway.debug(`late invoke result ignored: id=${p.id} node=${p.nodeId}`);
       respond(true, { ok: true, ignored: true }, undefined);
+      return;
+    }
+    respond(true, { ok: true }, undefined);
+  },
+  "node.invoke.result.chunk": async ({ params, respond, context, client }) => {
+    if (!validateNodeInvokeResultChunkParams(params)) {
+      respondInvalidParams({
+        respond,
+        method: "node.invoke.result.chunk",
+        validator: validateNodeInvokeResultChunkParams,
+      });
+      return;
+    }
+    const p = params as {
+      id: string;
+      nodeId: string;
+      index: number;
+      data: string;
+      bytes: number;
+    };
+    const callerNodeId = client?.connect?.device?.id ?? client?.connect?.client?.id;
+    if (callerNodeId && callerNodeId !== p.nodeId) {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "nodeId mismatch"));
+      return;
+    }
+    const res = context.nodeRegistry.handleInvokeResultChunk({
+      id: p.id,
+      nodeId: p.nodeId,
+      index: p.index,
+      data: p.data,
+      bytes: p.bytes,
+    });
+    if (!res.ok) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, res.message, {
+          details: { reason: res.reason },
+        }),
+      );
+      return;
+    }
+    respond(true, { ok: true }, undefined);
+  },
+  "node.invoke.result.abort": async ({ params, respond, context, client }) => {
+    if (!validateNodeInvokeResultAbortParams(params)) {
+      respondInvalidParams({
+        respond,
+        method: "node.invoke.result.abort",
+        validator: validateNodeInvokeResultAbortParams,
+      });
+      return;
+    }
+    const p = params as {
+      id: string;
+      nodeId: string;
+      error?: { code?: string; message?: string } | null;
+    };
+    const callerNodeId = client?.connect?.device?.id ?? client?.connect?.client?.id;
+    if (callerNodeId && callerNodeId !== p.nodeId) {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "nodeId mismatch"));
+      return;
+    }
+    const ok = context.nodeRegistry.abortInvokeResultTransfer({
+      id: p.id,
+      nodeId: p.nodeId,
+      error: p.error ?? null,
+    });
+    if (!ok) {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown invoke id"));
       return;
     }
     respond(true, { ok: true }, undefined);

@@ -1,10 +1,15 @@
 package com.clawdbot.android.gateway
 
 import android.util.Log
+import android.util.Base64
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.ceil
+import kotlin.math.max
+import kotlin.math.min
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -86,6 +91,11 @@ class GatewaySession(
 
   @Volatile private var canvasHostUrl: String? = null
   @Volatile private var mainSessionKey: String? = null
+  @Volatile private var supportsInvokeResultChunk = false
+  @Volatile private var supportsInvokeResultAbort = false
+  @Volatile private var maxPayloadBytes: Long = 512 * 1024
+  @Volatile private var maxInvokeResultBytes: Long = 50 * 1024 * 1024
+  @Volatile private var maxNodeInflightBytes: Long = 100 * 1024 * 1024
 
   private data class DesiredConnection(
     val endpoint: GatewayEndpoint,
@@ -321,6 +331,22 @@ class GatewaySession(
         obj["snapshot"].asObjectOrNull()
           ?.get("sessionDefaults").asObjectOrNull()
       mainSessionKey = sessionDefaults?.get("mainSessionKey").asStringOrNull()
+      val methods =
+        obj["features"].asObjectOrNull()
+          ?.get("methods")
+          ?.let { it as? JsonArray }
+          ?.mapNotNull { item -> item.asStringOrNull()?.trim()?.ifEmpty { null } }
+          ?: emptyList()
+      supportsInvokeResultChunk = methods.contains("node.invoke.result.chunk")
+      supportsInvokeResultAbort = methods.contains("node.invoke.result.abort")
+      val policy = obj["policy"].asObjectOrNull()
+      policy?.get("maxPayload").asLongOrNull()?.takeIf { it > 0 }?.let { maxPayloadBytes = it }
+      policy?.get("maxInvokeResultBytes").asLongOrNull()?.takeIf { it > 0 }?.let {
+        maxInvokeResultBytes = it
+      }
+      policy?.get("maxNodeInflightBytes").asLongOrNull()?.takeIf { it > 0 }?.let {
+        maxNodeInflightBytes = it
+      }
       onConnected(serverName, remoteAddress, mainSessionKey)
       connectDeferred.complete(Unit)
     }
@@ -516,6 +542,143 @@ class GatewaySession(
               },
             )
           }
+        }
+      if (result.ok && result.payloadJson != null && shouldChunkInvokeResult(params)) {
+        if (!supportsInvokeResultChunk) {
+          sendInvokeResultTooLarge(id, nodeId)
+          return
+        }
+        val payloadBytes = result.payloadJson.toByteArray(Charsets.UTF_8)
+        if (
+          payloadBytes.size.toLong() > maxInvokeResultBytes ||
+            payloadBytes.size.toLong() > maxNodeInflightBytes
+        ) {
+          sendInvokeResultTooLarge(id, nodeId)
+          return
+        }
+        val chunkBytes = resolveChunkBytes()
+        val chunkCount =
+          max(1, ceil(payloadBytes.size.toDouble() / chunkBytes.toDouble()).toInt())
+        val sha256 = sha256Hex(payloadBytes)
+        val startParams =
+          buildJsonObject {
+            put("id", JsonPrimitive(id))
+            put("nodeId", JsonPrimitive(nodeId))
+            put("ok", JsonPrimitive(true))
+            put(
+              "payloadTransfer",
+              buildJsonObject {
+                put("format", JsonPrimitive("json"))
+                put("encoding", JsonPrimitive("base64"))
+                put("totalBytes", JsonPrimitive(payloadBytes.size))
+                put("chunkBytes", JsonPrimitive(chunkBytes))
+                put("chunkCount", JsonPrimitive(chunkCount))
+                put("sha256", JsonPrimitive(sha256))
+              },
+            )
+          }
+        var startedChunking = false
+        try {
+          request("node.invoke.result", startParams, timeoutMs = 15_000)
+          startedChunking = true
+          for (index in 0 until chunkCount) {
+            val start = index * chunkBytes
+            val end = min(start + chunkBytes, payloadBytes.size)
+            val chunk = payloadBytes.copyOfRange(start, end)
+            val chunkParams =
+              buildJsonObject {
+                put("id", JsonPrimitive(id))
+                put("nodeId", JsonPrimitive(nodeId))
+                put("index", JsonPrimitive(index))
+                put("data", JsonPrimitive(Base64.encodeToString(chunk, Base64.NO_WRAP)))
+                put("bytes", JsonPrimitive(chunk.size))
+              }
+            request("node.invoke.result.chunk", chunkParams, timeoutMs = 15_000)
+          }
+          return
+        } catch (err: Throwable) {
+          if (startedChunking && supportsInvokeResultAbort) {
+            val abortParams =
+              buildJsonObject {
+                put("id", JsonPrimitive(id))
+                put("nodeId", JsonPrimitive(nodeId))
+                put(
+                  "error",
+                  buildJsonObject {
+                    put("code", JsonPrimitive("UNAVAILABLE"))
+                    put("message", JsonPrimitive("chunking failed"))
+                  },
+                )
+              }
+            try {
+              request("node.invoke.result.abort", abortParams, timeoutMs = 15_000)
+            } catch (_: Throwable) {}
+          } else if (!startedChunking) {
+            val failedParams =
+              buildJsonObject {
+                put("id", JsonPrimitive(id))
+                put("nodeId", JsonPrimitive(nodeId))
+                put("ok", JsonPrimitive(false))
+                put(
+                  "error",
+                  buildJsonObject {
+                    put("code", JsonPrimitive("UNAVAILABLE"))
+                    put("message", JsonPrimitive("chunking failed"))
+                  },
+                )
+              }
+            try {
+              request("node.invoke.result", failedParams, timeoutMs = 15_000)
+            } catch (_: Throwable) {}
+          }
+          Log.w(loggerTag, "node.invoke.result failed: ${err.message ?: err::class.java.simpleName}")
+          return
+        }
+      }
+      try {
+        request("node.invoke.result", params, timeoutMs = 15_000)
+      } catch (err: Throwable) {
+        Log.w(loggerTag, "node.invoke.result failed: ${err.message ?: err::class.java.simpleName}")
+      }
+    }
+
+    private fun shouldChunkInvokeResult(params: JsonObject): Boolean {
+      val frame =
+        buildJsonObject {
+          put("type", JsonPrimitive("req"))
+          put("id", JsonPrimitive(UUID.randomUUID().toString()))
+          put("method", JsonPrimitive("node.invoke.result"))
+          put("params", params)
+        }
+      val payload = json.encodeToString(JsonElement.serializer(), frame)
+      return payload.toByteArray(Charsets.UTF_8).size.toLong() > maxPayloadBytes
+    }
+
+    private fun resolveChunkBytes(): Int {
+      val overheadBytes = 4096L
+      val maxEncoded = max(1L, maxPayloadBytes - overheadBytes)
+      val maxRaw = max(1L, (maxEncoded * 3) / 4)
+      return min(256 * 1024, maxRaw.toInt())
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String {
+      val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+      return digest.joinToString("") { b -> "%02x".format(b) }
+    }
+
+    private suspend fun sendInvokeResultTooLarge(id: String, nodeId: String) {
+      val params =
+        buildJsonObject {
+          put("id", JsonPrimitive(id))
+          put("nodeId", JsonPrimitive(nodeId))
+          put("ok", JsonPrimitive(false))
+          put(
+            "error",
+            buildJsonObject {
+              put("code", JsonPrimitive("UNAVAILABLE"))
+              put("message", JsonPrimitive("payload too large"))
+            },
+          )
         }
       try {
         request("node.invoke.result", params, timeoutMs = 15_000)

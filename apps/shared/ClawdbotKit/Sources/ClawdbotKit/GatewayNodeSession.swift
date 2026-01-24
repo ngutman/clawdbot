@@ -1,4 +1,5 @@
 import ClawdbotProtocol
+import CryptoKit
 import Foundation
 import OSLog
 
@@ -9,6 +10,13 @@ private struct NodeInvokeRequestPayload: Codable, Sendable {
     var paramsJSON: String?
     var timeoutMs: Int?
     var idempotencyKey: String?
+}
+
+private struct InvokeResultSizeProbe: Codable, Sendable {
+    var type: String
+    var id: String
+    var method: String
+    var params: [String: AnyCodable]?
 }
 
 public actor GatewayNodeSession {
@@ -23,6 +31,11 @@ public actor GatewayNodeSession {
     private var onConnected: (@Sendable () async -> Void)?
     private var onDisconnected: (@Sendable (String) async -> Void)?
     private var onInvoke: (@Sendable (BridgeInvokeRequest) async -> BridgeInvokeResponse)?
+    private var supportsInvokeResultChunk = false
+    private var supportsInvokeResultAbort = false
+    private var maxPayloadBytes = 512 * 1024
+    private var maxInvokeResultBytes = 50 * 1024 * 1024
+    private var maxNodeInflightBytes = 100 * 1024 * 1024
 
     static func invokeWithTimeout(
         request: BridgeInvokeRequest,
@@ -179,6 +192,18 @@ public actor GatewayNodeSession {
         case let .snapshot(ok):
             let raw = ok.canvashosturl?.trimmingCharacters(in: .whitespacesAndNewlines)
             self.canvasHostUrl = (raw?.isEmpty == false) ? raw : nil
+            let methods = self.extractFeatureMethods(ok)
+            self.supportsInvokeResultChunk = methods.contains("node.invoke.result.chunk")
+            self.supportsInvokeResultAbort = methods.contains("node.invoke.result.abort")
+            if let maxPayload = self.policyInt(ok.policy["maxPayload"]) {
+                self.maxPayloadBytes = maxPayload
+            }
+            if let maxInvokeResult = self.policyInt(ok.policy["maxInvokeResultBytes"]) {
+                self.maxInvokeResultBytes = maxInvokeResult
+            }
+            if let maxInflight = self.policyInt(ok.policy["maxNodeInflightBytes"]) {
+                self.maxNodeInflightBytes = maxInflight
+            }
             await self.onConnected?()
         case let .event(evt):
             await self.handleEvent(evt)
@@ -223,6 +248,112 @@ public actor GatewayNodeSession {
                 "message": error.message,
             ])
         }
+        if response.ok, let payloadJSON = response.payloadJSON, self.shouldChunkInvokeResult(params) {
+            if !self.supportsInvokeResultChunk {
+                let tooLarge: [String: AnyCodable] = [
+                    "id": AnyCodable(request.id),
+                    "nodeId": AnyCodable(request.nodeId),
+                    "ok": AnyCodable(false),
+                    "error": AnyCodable([
+                        "code": "UNAVAILABLE",
+                        "message": "payload too large",
+                    ]),
+                ]
+                do {
+                    _ = try await channel.request(method: "node.invoke.result", params: tooLarge, timeoutMs: 15000)
+                } catch {
+                    self.logger.error("node invoke result failed: \(error.localizedDescription, privacy: .public)")
+                }
+                return
+            }
+            let payloadData = Data(payloadJSON.utf8)
+            if payloadData.count > self.maxInvokeResultBytes || payloadData.count > self.maxNodeInflightBytes {
+                let tooLarge: [String: AnyCodable] = [
+                    "id": AnyCodable(request.id),
+                    "nodeId": AnyCodable(request.nodeId),
+                    "ok": AnyCodable(false),
+                    "error": AnyCodable([
+                        "code": "UNAVAILABLE",
+                        "message": "payload too large",
+                    ]),
+                ]
+                do {
+                    _ = try await channel.request(method: "node.invoke.result", params: tooLarge, timeoutMs: 15000)
+                } catch {
+                    self.logger.error("node invoke result failed: \(error.localizedDescription, privacy: .public)")
+                }
+                return
+            }
+            let chunkBytes = self.resolveChunkBytes()
+            let chunkCount = max(1, Int(ceil(Double(payloadData.count) / Double(chunkBytes))))
+            let sha256 = SHA256.hash(data: payloadData).map { String(format: "%02x", $0) }.joined()
+            let startParams: [String: AnyCodable] = [
+                "id": AnyCodable(request.id),
+                "nodeId": AnyCodable(request.nodeId),
+                "ok": AnyCodable(true),
+                "payloadTransfer": AnyCodable([
+                    "format": "json",
+                    "encoding": "base64",
+                    "totalBytes": payloadData.count,
+                    "chunkBytes": chunkBytes,
+                    "chunkCount": chunkCount,
+                    "sha256": sha256,
+                ]),
+            ]
+            var startedChunking = false
+            do {
+                _ = try await channel.request(method: "node.invoke.result", params: startParams, timeoutMs: 15000)
+                startedChunking = true
+                for index in 0..<chunkCount {
+                    let start = index * chunkBytes
+                    let end = min(start + chunkBytes, payloadData.count)
+                    let chunk = payloadData.subdata(in: start..<end)
+                    let chunkParams: [String: AnyCodable] = [
+                        "id": AnyCodable(request.id),
+                        "nodeId": AnyCodable(request.nodeId),
+                        "index": AnyCodable(index),
+                        "data": AnyCodable(chunk.base64EncodedString()),
+                        "bytes": AnyCodable(chunk.count),
+                    ]
+                    _ = try await channel.request(
+                        method: "node.invoke.result.chunk",
+                        params: chunkParams,
+                        timeoutMs: 15000)
+                }
+                return
+            } catch {
+                if startedChunking && self.supportsInvokeResultAbort {
+                    let abortParams: [String: AnyCodable] = [
+                        "id": AnyCodable(request.id),
+                        "nodeId": AnyCodable(request.nodeId),
+                        "error": AnyCodable([
+                            "code": "UNAVAILABLE",
+                            "message": "chunking failed",
+                        ]),
+                    ]
+                    _ = try? await channel.request(
+                        method: "node.invoke.result.abort",
+                        params: abortParams,
+                        timeoutMs: 15000)
+                } else if !startedChunking {
+                    let failedParams: [String: AnyCodable] = [
+                        "id": AnyCodable(request.id),
+                        "nodeId": AnyCodable(request.nodeId),
+                        "ok": AnyCodable(false),
+                        "error": AnyCodable([
+                            "code": "UNAVAILABLE",
+                            "message": "chunking failed",
+                        ]),
+                    ]
+                    _ = try? await channel.request(
+                        method: "node.invoke.result",
+                        params: failedParams,
+                        timeoutMs: 15000)
+                }
+                self.logger.error("node invoke result failed: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+        }
         do {
             try await channel.send(method: "node.invoke.result", params: params)
         } catch {
@@ -246,6 +377,43 @@ public actor GatewayNodeSession {
         return dict.reduce(into: [:]) { acc, entry in
             acc[entry.key] = AnyCodable(entry.value)
         }
+    }
+
+    private func extractFeatureMethods(_ ok: HelloOk) -> [String] {
+        guard let raw = ok.features["methods"]?.value else { return [] }
+        if let items = raw as? [AnyCodable] {
+            return items.compactMap { item in
+                (item.value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            }.filter { !$0.isEmpty }
+        }
+        if let items = raw as? [String] {
+            return items.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        }
+        return []
+    }
+
+    private func policyInt(_ value: AnyCodable?) -> Int? {
+        if let intVal = value?.value as? Int { return intVal }
+        if let doubleVal = value?.value as? Double { return Int(doubleVal) }
+        if let number = value?.value as? NSNumber { return number.intValue }
+        return nil
+    }
+
+    private func shouldChunkInvokeResult(_ params: [String: AnyCodable]) -> Bool {
+        let probe = InvokeResultSizeProbe(
+            type: "req",
+            id: UUID().uuidString,
+            method: "node.invoke.result",
+            params: params)
+        guard let data = try? self.encoder.encode(probe) else { return false }
+        return data.count > self.maxPayloadBytes
+    }
+
+    private func resolveChunkBytes() -> Int {
+        let overheadBytes = 4096
+        let maxEncoded = max(1, self.maxPayloadBytes - overheadBytes)
+        let maxRaw = max(1, (maxEncoded * 3) / 4)
+        return min(256 * 1024, maxRaw)
     }
 
     private func broadcastServerEvent(_ evt: EventFrame) {

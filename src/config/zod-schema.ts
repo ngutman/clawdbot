@@ -433,6 +433,7 @@ export const ClawdbotSchema = z
               .optional(),
             allowCommands: z.array(z.string()).optional(),
             denyCommands: z.array(z.string()).optional(),
+            maxInvokeResultBytes: z.number().int().positive().optional(),
           })
           .strict()
           .optional(),

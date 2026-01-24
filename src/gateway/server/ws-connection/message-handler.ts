@@ -40,7 +40,13 @@ import {
   validateRequestFrame,
 } from "../../protocol/index.js";
 import { GATEWAY_CLIENT_IDS } from "../../protocol/client-info.js";
-import { MAX_BUFFERED_BYTES, MAX_PAYLOAD_BYTES, TICK_INTERVAL_MS } from "../../server-constants.js";
+import {
+  MAX_BUFFERED_BYTES,
+  MAX_PAYLOAD_BYTES,
+  TICK_INTERVAL_MS,
+  resolveMaxNodeInflightBytes,
+  resolveMaxNodeInvokeResultBytes,
+} from "../../server-constants.js";
 import type { GatewayRequestContext, GatewayRequestHandlers } from "../../server-methods/types.js";
 import { handleGatewayRequest } from "../../server-methods.js";
 import { formatError } from "../../server-utils.js";
@@ -716,8 +722,8 @@ export function attachGatewayWsMessageHandler(params: {
           ? await ensureDeviceToken({ deviceId: device.id, role, scopes })
           : null;
 
+        const cfg = loadConfig();
         if (role === "node") {
-          const cfg = loadConfig();
           const allowlist = resolveNodeCommandAllowlist(cfg, {
             platform: connectParams.client.platform,
             deviceFamily: connectParams.client.deviceFamily,
@@ -777,6 +783,8 @@ export function attachGatewayWsMessageHandler(params: {
           snapshot.health = cachedHealth;
           snapshot.stateVersion.health = getHealthVersion();
         }
+        const maxInvokeResultBytes = resolveMaxNodeInvokeResultBytes(cfg);
+        const maxNodeInflightBytes = resolveMaxNodeInflightBytes(maxInvokeResultBytes);
         const helloOk = {
           type: "hello-ok",
           protocol: PROTOCOL_VERSION,
@@ -801,6 +809,8 @@ export function attachGatewayWsMessageHandler(params: {
             maxPayload: MAX_PAYLOAD_BYTES,
             maxBufferedBytes: MAX_BUFFERED_BYTES,
             tickIntervalMs: TICK_INTERVAL_MS,
+            maxInvokeResultBytes,
+            maxNodeInflightBytes,
           },
         };
 

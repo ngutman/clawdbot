@@ -105,6 +105,8 @@ export const HelloOkSchema = Type.Object(
         maxPayload: Type.Integer({ minimum: 1 }),
         maxBufferedBytes: Type.Integer({ minimum: 1 }),
         tickIntervalMs: Type.Integer({ minimum: 1 }),
+        maxInvokeResultBytes: Type.Optional(Type.Integer({ minimum: 1 })),
+        maxNodeInflightBytes: Type.Optional(Type.Integer({ minimum: 1 })),
       },
       { additionalProperties: false },
     ),

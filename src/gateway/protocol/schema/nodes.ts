@@ -67,6 +67,47 @@ export const NodeInvokeResultParamsSchema = Type.Object(
     ok: Type.Boolean(),
     payload: Type.Optional(Type.Unknown()),
     payloadJSON: Type.Optional(Type.String()),
+    payloadTransfer: Type.Optional(
+      Type.Object(
+        {
+          format: Type.Literal("json"),
+          encoding: Type.Literal("base64"),
+          totalBytes: Type.Integer({ minimum: 1 }),
+          chunkBytes: Type.Integer({ minimum: 1 }),
+          chunkCount: Type.Integer({ minimum: 1 }),
+          sha256: Type.String({ pattern: "^[0-9a-fA-F]{64}$" }),
+        },
+        { additionalProperties: false },
+      ),
+    ),
+    error: Type.Optional(
+      Type.Object(
+        {
+          code: Type.Optional(NonEmptyString),
+          message: Type.Optional(NonEmptyString),
+        },
+        { additionalProperties: false },
+      ),
+    ),
+  },
+  { additionalProperties: false },
+);
+
+export const NodeInvokeResultChunkParamsSchema = Type.Object(
+  {
+    id: NonEmptyString,
+    nodeId: NonEmptyString,
+    index: Type.Integer({ minimum: 0 }),
+    data: NonEmptyString,
+    bytes: Type.Integer({ minimum: 0 }),
+  },
+  { additionalProperties: false },
+);
+
+export const NodeInvokeResultAbortParamsSchema = Type.Object(
+  {
+    id: NonEmptyString,
+    nodeId: NonEmptyString,
     error: Type.Optional(
       Type.Object(
         {

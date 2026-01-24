@@ -188,6 +188,8 @@ export type GatewayNodesConfig = {
   allowCommands?: string[];
   /** Commands to deny even if they appear in the defaults or node claims. */
   denyCommands?: string[];
+  /** Max bytes allowed for node.invoke.result payloads (default: 50MB). */
+  maxInvokeResultBytes?: number;
 };
 
 export type GatewayConfig = {
