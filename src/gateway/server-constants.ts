@@ -13,8 +13,7 @@ export const resolveMaxNodeInvokeResultBytes = (cfg?: {
   return DEFAULT_MAX_NODE_INVOKE_RESULT_BYTES;
 };
 
-export const resolveMaxNodeInflightBytes = (maxInvokeResultBytes: number) =>
-  Math.max(MAX_NODE_INFLIGHT_BYTES, maxInvokeResultBytes);
+export const resolveMaxNodeInflightBytes = () => MAX_NODE_INFLIGHT_BYTES;
 
 const DEFAULT_MAX_CHAT_HISTORY_MESSAGES_BYTES = 6 * 1024 * 1024; // keep history responses comfortably under client WS limits
 let maxChatHistoryMessagesBytes = DEFAULT_MAX_CHAT_HISTORY_MESSAGES_BYTES;

@@ -1183,7 +1183,13 @@ async function sendInvokeResult(
       return;
     }
     const payloadJSON = resolveInvokeResultPayloadJSON(result);
-    if (!payloadJSON || !shouldChunkInvokeResult(params, policy.maxPayload)) {
+    if (
+      !payloadJSON ||
+      !shouldChunkInvokeResult(
+        { id: frame.id, nodeId: frame.nodeId, ok: true, payloadJSON },
+        policy.maxPayload,
+      )
+    ) {
       await client.request("node.invoke.result", params);
       return;
     }
@@ -1271,7 +1277,7 @@ function resolveInvokeResultPayloadJSON(result: {
 }
 
 function shouldChunkInvokeResult(
-  params: { id: string; nodeId: string; ok: boolean; payload?: unknown; payloadJSON?: string },
+  params: { id: string; nodeId: string; ok: boolean; payloadJSON: string },
   maxPayload: number,
 ): boolean {
   const previewFrame = {

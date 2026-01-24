@@ -784,7 +784,7 @@ export function attachGatewayWsMessageHandler(params: {
           snapshot.stateVersion.health = getHealthVersion();
         }
         const maxInvokeResultBytes = resolveMaxNodeInvokeResultBytes(cfg);
-        const maxNodeInflightBytes = resolveMaxNodeInflightBytes(maxInvokeResultBytes);
+        const maxNodeInflightBytes = resolveMaxNodeInflightBytes();
         const helloOk = {
           type: "hello-ok",
           protocol: PROTOCOL_VERSION,

@@ -500,7 +500,7 @@ export const nodeHandlers: GatewayRequestHandlers = {
       }
       const cfg = loadConfig();
       const maxInvokeResultBytes = resolveMaxNodeInvokeResultBytes(cfg);
-      const maxNodeInflightBytes = resolveMaxNodeInflightBytes(maxInvokeResultBytes);
+      const maxNodeInflightBytes = resolveMaxNodeInflightBytes();
       const start = context.nodeRegistry.startInvokeResultTransfer({
         id: p.id,
         nodeId: p.nodeId,

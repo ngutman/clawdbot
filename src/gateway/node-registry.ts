@@ -221,12 +221,12 @@ export class NodeRegistry {
     if (this.invokeTransfers.has(params.id)) {
       this.resolveInvokeError(params.id, params.nodeId, {
         code: "INVALID_REQUEST",
-        message: "invoke transfer already started",
+        message: "chunk out of order",
       });
       return {
         ok: false,
         reason: "chunk-out-of-order",
-        message: "invoke transfer already started",
+        message: "chunk out of order",
       };
     }
     if (params.totalBytes > params.maxInvokeResultBytes) {
@@ -267,6 +267,13 @@ export class NodeRegistry {
   }): InvokeTransferResult {
     const transfer = this.invokeTransfers.get(params.id);
     if (!transfer || transfer.nodeId !== params.nodeId) {
+      const pending = this.pendingInvokes.get(params.id);
+      if (pending && pending.nodeId === params.nodeId) {
+        this.resolveInvokeError(params.id, params.nodeId, {
+          code: "INVALID_REQUEST",
+          message: "unknown invoke id",
+        });
+      }
       return { ok: false, reason: "unknown-invoke-id", message: "unknown invoke id" };
     }
     if (params.index !== transfer.nextIndex || params.index >= transfer.chunkCount) {
