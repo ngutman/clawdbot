@@ -1,7 +1,6 @@
 export const MAX_PAYLOAD_BYTES = 512 * 1024; // cap incoming frame size
 export const MAX_BUFFERED_BYTES = 1.5 * 1024 * 1024; // per-connection send buffer limit
 export const DEFAULT_MAX_NODE_INVOKE_RESULT_BYTES = 50 * 1024 * 1024;
-export const MAX_NODE_INFLIGHT_BYTES = DEFAULT_MAX_NODE_INVOKE_RESULT_BYTES * 2;
 
 export const resolveMaxNodeInvokeResultBytes = (cfg?: {
   gateway?: { nodes?: { maxInvokeResultBytes?: number } };
@@ -12,8 +11,6 @@ export const resolveMaxNodeInvokeResultBytes = (cfg?: {
   }
   return DEFAULT_MAX_NODE_INVOKE_RESULT_BYTES;
 };
-
-export const resolveMaxNodeInflightBytes = () => MAX_NODE_INFLIGHT_BYTES;
 
 const DEFAULT_MAX_CHAT_HISTORY_MESSAGES_BYTES = 6 * 1024 * 1024; // keep history responses comfortably under client WS limits
 let maxChatHistoryMessagesBytes = DEFAULT_MAX_CHAT_HISTORY_MESSAGES_BYTES;

@@ -64,7 +64,6 @@ const BASE_METHODS = [
   "node.invoke",
   "node.invoke.result",
   "node.invoke.result.chunk",
-  "node.invoke.result.abort",
   "node.event",
   "cron.list",
   "cron.status",

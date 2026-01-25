@@ -87,7 +87,6 @@ import type {
   NodeDescribeParamsSchema,
   NodeEventParamsSchema,
   NodeInvokeParamsSchema,
-  NodeInvokeResultAbortParamsSchema,
   NodeInvokeResultChunkParamsSchema,
   NodeInvokeResultParamsSchema,
   NodeListParamsSchema,
@@ -146,7 +145,6 @@ export type NodeDescribeParams = Static<typeof NodeDescribeParamsSchema>;
 export type NodeInvokeParams = Static<typeof NodeInvokeParamsSchema>;
 export type NodeInvokeResultParams = Static<typeof NodeInvokeResultParamsSchema>;
 export type NodeInvokeResultChunkParams = Static<typeof NodeInvokeResultChunkParamsSchema>;
-export type NodeInvokeResultAbortParams = Static<typeof NodeInvokeResultAbortParamsSchema>;
 export type NodeEventParams = Static<typeof NodeEventParamsSchema>;
 export type SessionsListParams = Static<typeof SessionsListParamsSchema>;
 export type SessionsPreviewParams = Static<typeof SessionsPreviewParamsSchema>;

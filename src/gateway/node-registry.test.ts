@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import { describe, expect, test, vi } from "vitest";
 
 import { NodeRegistry } from "./node-registry.js";
@@ -43,7 +41,6 @@ describe("NodeRegistry chunked invoke results", () => {
 
     const payloadJSON = JSON.stringify({ ok: true, value: "hello" });
     const payloadBytes = Buffer.from(payloadJSON, "utf8");
-    const sha256 = createHash("sha256").update(payloadBytes).digest("hex");
     const chunkBytes = 4;
     const chunkCount = Math.ceil(payloadBytes.length / chunkBytes);
 
@@ -51,11 +48,8 @@ describe("NodeRegistry chunked invoke results", () => {
       id: invokeId,
       nodeId: "node-1",
       totalBytes: payloadBytes.length,
-      chunkBytes,
       chunkCount,
-      sha256,
       maxInvokeResultBytes: 1024 * 1024,
-      maxInflightBytes: 1024 * 1024,
     });
     expect(start.ok).toBe(true);
 
@@ -95,7 +89,6 @@ describe("NodeRegistry chunked invoke results", () => {
 
     const payloadJSON = JSON.stringify({ ok: true });
     const payloadBytes = Buffer.from(payloadJSON, "utf8");
-    const sha256 = createHash("sha256").update(payloadBytes).digest("hex");
     const chunkBytes = 4;
     const chunkCount = Math.ceil(payloadBytes.length / chunkBytes);
 
@@ -103,11 +96,8 @@ describe("NodeRegistry chunked invoke results", () => {
       id: invokeId,
       nodeId: "node-1",
       totalBytes: payloadBytes.length,
-      chunkBytes,
       chunkCount,
-      sha256,
       maxInvokeResultBytes: 1024 * 1024,
-      maxInflightBytes: 1024 * 1024,
     });
     expect(start.ok).toBe(true);
 

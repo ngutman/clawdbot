@@ -105,8 +105,6 @@ import {
   NodeEventParamsSchema,
   type NodeInvokeParams,
   NodeInvokeParamsSchema,
-  type NodeInvokeResultAbortParams,
-  NodeInvokeResultAbortParamsSchema,
   type NodeInvokeResultChunkParams,
   NodeInvokeResultChunkParamsSchema,
   type NodeInvokeResultParams,
@@ -235,9 +233,6 @@ export const validateNodeInvokeResultParams = ajv.compile<NodeInvokeResultParams
 );
 export const validateNodeInvokeResultChunkParams = ajv.compile<NodeInvokeResultChunkParams>(
   NodeInvokeResultChunkParamsSchema,
-);
-export const validateNodeInvokeResultAbortParams = ajv.compile<NodeInvokeResultAbortParams>(
-  NodeInvokeResultAbortParamsSchema,
 );
 export const validateNodeEventParams = ajv.compile<NodeEventParams>(NodeEventParamsSchema);
 export const validateSessionsListParams = ajv.compile<SessionsListParams>(SessionsListParamsSchema);
@@ -392,7 +387,6 @@ export {
   NodeInvokeParamsSchema,
   NodeInvokeResultParamsSchema,
   NodeInvokeResultChunkParamsSchema,
-  NodeInvokeResultAbortParamsSchema,
   SessionsListParamsSchema,
   SessionsPreviewParamsSchema,
   SessionsPatchParamsSchema,
@@ -506,7 +500,6 @@ export type {
   NodeInvokeParams,
   NodeInvokeResultParams,
   NodeInvokeResultChunkParams,
-  NodeInvokeResultAbortParams,
   NodeEventParams,
   SessionsListParams,
   SessionsPreviewParams,

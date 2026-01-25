@@ -44,7 +44,6 @@ import {
   MAX_BUFFERED_BYTES,
   MAX_PAYLOAD_BYTES,
   TICK_INTERVAL_MS,
-  resolveMaxNodeInflightBytes,
   resolveMaxNodeInvokeResultBytes,
 } from "../../server-constants.js";
 import type { GatewayRequestContext, GatewayRequestHandlers } from "../../server-methods/types.js";
@@ -784,7 +783,6 @@ export function attachGatewayWsMessageHandler(params: {
           snapshot.stateVersion.health = getHealthVersion();
         }
         const maxInvokeResultBytes = resolveMaxNodeInvokeResultBytes(cfg);
-        const maxNodeInflightBytes = resolveMaxNodeInflightBytes();
         const helloOk = {
           type: "hello-ok",
           protocol: PROTOCOL_VERSION,
@@ -810,7 +808,6 @@ export function attachGatewayWsMessageHandler(params: {
             maxBufferedBytes: MAX_BUFFERED_BYTES,
             tickIntervalMs: TICK_INTERVAL_MS,
             maxInvokeResultBytes,
-            maxNodeInflightBytes,
           },
         };
 

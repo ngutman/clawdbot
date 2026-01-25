@@ -81,18 +81,14 @@ type BrowserProxyParams = {
 
 type InvokeResultPolicy = {
   supportsChunking: boolean;
-  supportsAbort: boolean;
   maxPayload: number;
   maxInvokeResultBytes: number;
-  maxNodeInflightBytes: number;
 };
 
 const DEFAULT_INVOKE_RESULT_POLICY: InvokeResultPolicy = {
   supportsChunking: false,
-  supportsAbort: false,
   maxPayload: 512 * 1024,
   maxInvokeResultBytes: 50 * 1024 * 1024,
-  maxNodeInflightBytes: 100 * 1024 * 1024,
 };
 
 let invokeResultPolicy: InvokeResultPolicy = { ...DEFAULT_INVOKE_RESULT_POLICY };
@@ -556,7 +552,6 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
       invokeResultPolicy = {
         ...invokeResultPolicy,
         supportsChunking: methods.includes("node.invoke.result.chunk"),
-        supportsAbort: methods.includes("node.invoke.result.abort"),
         maxPayload:
           typeof helloOk?.policy?.maxPayload === "number"
             ? helloOk.policy.maxPayload
@@ -565,10 +560,6 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
           typeof helloOk?.policy?.maxInvokeResultBytes === "number"
             ? helloOk.policy.maxInvokeResultBytes
             : invokeResultPolicy.maxInvokeResultBytes,
-        maxNodeInflightBytes:
-          typeof helloOk?.policy?.maxNodeInflightBytes === "number"
-            ? helloOk.policy.maxNodeInflightBytes
-            : invokeResultPolicy.maxNodeInflightBytes,
       };
     },
     onEvent: (evt) => {
@@ -1174,7 +1165,6 @@ async function sendInvokeResult(
   },
 ) {
   let attemptedChunking = false;
-  let startedChunking = false;
   try {
     const params = buildNodeInvokeResultParams(frame, result);
     const policy = invokeResultPolicy ?? DEFAULT_INVOKE_RESULT_POLICY;
@@ -1200,17 +1190,13 @@ async function sendInvokeResult(
 
     attemptedChunking = true;
     const payloadBytes = Buffer.from(payloadJSON, "utf8");
-    if (
-      payloadBytes.length > policy.maxInvokeResultBytes ||
-      payloadBytes.length > policy.maxNodeInflightBytes
-    ) {
+    if (payloadBytes.length > policy.maxInvokeResultBytes) {
       await sendInvokeResultTooLarge(client, frame);
       return;
     }
 
     const chunkBytes = resolveChunkBytes(policy.maxPayload);
     const chunkCount = Math.ceil(payloadBytes.length / chunkBytes);
-    const sha256 = crypto.createHash("sha256").update(payloadBytes).digest("hex");
     await client.request("node.invoke.result", {
       id: frame.id,
       nodeId: frame.nodeId,
@@ -1219,12 +1205,9 @@ async function sendInvokeResult(
         format: "json",
         encoding: "base64",
         totalBytes: payloadBytes.length,
-        chunkBytes,
         chunkCount,
-        sha256,
       },
     });
-    startedChunking = true;
     for (let index = 0; index < chunkCount; index += 1) {
       const start = index * chunkBytes;
       const chunk = payloadBytes.subarray(start, start + chunkBytes);
@@ -1237,17 +1220,7 @@ async function sendInvokeResult(
       });
     }
   } catch {
-    if (startedChunking && invokeResultPolicy.supportsAbort) {
-      try {
-        await client.request("node.invoke.result.abort", {
-          id: frame.id,
-          nodeId: frame.nodeId,
-          error: { code: "UNAVAILABLE", message: "chunking failed" },
-        });
-      } catch {
-        // ignore
-      }
-    } else if (attemptedChunking && !startedChunking) {
+    if (attemptedChunking) {
       try {
         await client.request("node.invoke.result", {
           id: frame.id,

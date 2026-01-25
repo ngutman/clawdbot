@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import type { GatewayWsClient } from "./server/ws-types.js";
 
@@ -32,12 +32,9 @@ type PendingInvoke = {
 type PendingInvokeTransfer = {
   nodeId: string;
   totalBytes: number;
-  chunkBytes: number;
   chunkCount: number;
   nextIndex: number;
   bytesReceived: number;
-  sha256: string;
-  hash: ReturnType<typeof createHash>;
   chunks: Buffer[];
 };
 
@@ -45,8 +42,7 @@ type InvokeTransferFailureReason =
   | "unknown-invoke-id"
   | "payload-too-large"
   | "chunk-out-of-order"
-  | "chunk-bytes-mismatch"
-  | "hash-mismatch";
+  | "chunk-bytes-mismatch";
 
 type InvokeTransferResult =
   | { ok: true }
@@ -64,7 +60,6 @@ export class NodeRegistry {
   private nodesByConn = new Map<string, string>();
   private pendingInvokes = new Map<string, PendingInvoke>();
   private invokeTransfers = new Map<string, PendingInvokeTransfer>();
-  private inflightBytes = 0;
 
   register(client: GatewayWsClient, opts: { remoteIp?: string | undefined }) {
     const connect = client.connect;
@@ -208,11 +203,8 @@ export class NodeRegistry {
     id: string;
     nodeId: string;
     totalBytes: number;
-    chunkBytes: number;
     chunkCount: number;
-    sha256: string;
     maxInvokeResultBytes: number;
-    maxInflightBytes: number;
   }): InvokeTransferResult {
     const pending = this.pendingInvokes.get(params.id);
     if (!pending || pending.nodeId !== params.nodeId) {
@@ -236,23 +228,12 @@ export class NodeRegistry {
       });
       return { ok: false, reason: "payload-too-large", message: "payload too large" };
     }
-    if (this.inflightBytes + params.totalBytes > params.maxInflightBytes) {
-      this.resolveInvokeError(params.id, params.nodeId, {
-        code: "INVALID_REQUEST",
-        message: "payload too large",
-      });
-      return { ok: false, reason: "payload-too-large", message: "payload too large" };
-    }
-    this.inflightBytes += params.totalBytes;
     this.invokeTransfers.set(params.id, {
       nodeId: params.nodeId,
       totalBytes: params.totalBytes,
-      chunkBytes: params.chunkBytes,
       chunkCount: params.chunkCount,
       nextIndex: 0,
       bytesReceived: 0,
-      sha256: params.sha256.toLowerCase(),
-      hash: createHash("sha256"),
       chunks: [],
     });
     return { ok: true };
@@ -301,7 +282,6 @@ export class NodeRegistry {
     }
     transfer.bytesReceived = nextBytes;
     transfer.nextIndex += 1;
-    transfer.hash.update(decoded);
     transfer.chunks.push(decoded);
 
     if (transfer.nextIndex === transfer.chunkCount) {
@@ -311,14 +291,6 @@ export class NodeRegistry {
           message: "chunk bytes mismatch",
         });
         return { ok: false, reason: "chunk-bytes-mismatch", message: "chunk bytes mismatch" };
-      }
-      const digest = transfer.hash.digest("hex").toLowerCase();
-      if (digest !== transfer.sha256) {
-        this.resolveInvokeError(params.id, params.nodeId, {
-          code: "INVALID_REQUEST",
-          message: "hash mismatch",
-        });
-        return { ok: false, reason: "hash-mismatch", message: "hash mismatch" };
       }
       const payloadJSON = Buffer.concat(transfer.chunks, transfer.totalBytes).toString("utf8");
       this.handleInvokeResult({
@@ -330,28 +302,6 @@ export class NodeRegistry {
     }
 
     return { ok: true };
-  }
-
-  abortInvokeResultTransfer(params: {
-    id: string;
-    nodeId: string;
-    error?: { code?: string; message?: string } | null;
-  }): boolean {
-    const pending = this.pendingInvokes.get(params.id);
-    if (!pending || pending.nodeId !== params.nodeId) {
-      const transfer = this.invokeTransfers.get(params.id);
-      if (transfer && transfer.nodeId === params.nodeId) {
-        this.clearInvokeTransfer(params.id);
-      }
-      return false;
-    }
-    this.handleInvokeResult({
-      id: params.id,
-      nodeId: params.nodeId,
-      ok: false,
-      error: params.error ?? { code: "UNAVAILABLE", message: "node invoke aborted" },
-    });
-    return true;
   }
 
   sendEvent(nodeId: string, event: string, payload?: unknown): boolean {
@@ -396,6 +346,5 @@ export class NodeRegistry {
     const transfer = this.invokeTransfers.get(id);
     if (!transfer) return;
     this.invokeTransfers.delete(id);
-    this.inflightBytes = Math.max(0, this.inflightBytes - transfer.totalBytes);
   }
 }

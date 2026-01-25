@@ -35,7 +35,6 @@ const APPROVAL_METHODS = new Set(["exec.approval.request", "exec.approval.resolv
 const NODE_ROLE_METHODS = new Set([
   "node.invoke.result",
   "node.invoke.result.chunk",
-  "node.invoke.result.abort",
   "node.event",
   "skills.bins",
 ]);
