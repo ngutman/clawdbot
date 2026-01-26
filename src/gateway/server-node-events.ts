@@ -172,7 +172,8 @@ export const handleNodeEvent = async (ctx: NodeEventContext, nodeId: string, evt
     }
     case "exec.started":
     case "exec.finished":
-    case "exec.denied": {
+    case "exec.denied":
+    case "exec.pending": {
       if (!evt.payloadJSON) return;
       let payload: unknown;
       try {
@@ -203,6 +204,10 @@ export const handleNodeEvent = async (ctx: NodeEventContext, nodeId: string, evt
         const exitLabel = timedOut ? "timeout" : `code ${exitCode ?? "?"}`;
         text = `Exec finished (node=${nodeId}${runId ? ` id=${runId}` : ""}, ${exitLabel})`;
         if (output) text += `\n${output}`;
+      } else if (evt.event === "exec.pending") {
+        text = `Exec pending approval (node=${nodeId}${runId ? ` id=${runId}` : ""})`;
+        if (command) text += `: ${command}`;
+        if (reason) text += ` (${reason})`;
       } else {
         text = `Exec denied (node=${nodeId}${runId ? ` id=${runId}` : ""}${reason ? `, ${reason}` : ""})`;
         if (command) text += `: ${command}`;

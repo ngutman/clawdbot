@@ -459,12 +459,18 @@ function buildExecEventPayload(payload: ExecEventPayload): ExecEventPayload {
 async function runViaMacAppExecHost(params: {
   approvals: ReturnType<typeof resolveExecApprovals>;
   request: ExecHostRequest;
+  onPending?: () => void;
 }): Promise<ExecHostResponse | null> {
-  const { approvals, request } = params;
+  const { approvals, request, onPending } = params;
   return await requestExecHostViaSocket({
     socketPath: approvals.socketPath,
     token: approvals.token,
     request,
+    onPending: onPending
+      ? () => {
+          onPending();
+        }
+      : undefined,
   });
 }
 
@@ -873,7 +879,60 @@ async function handleInvoke(
       sessionKey: sessionKey ?? null,
       approvalDecision,
     };
-    const response = await runViaMacAppExecHost({ approvals, request: execRequest });
+    let pendingResultSent = false;
+    const response = await runViaMacAppExecHost({
+      approvals,
+      request: execRequest,
+      onPending: () => {
+        // Send pending event AND invoke result immediately when approval dialog is shown
+        // This ensures the CLI gets a meaningful error instead of a generic timeout
+        if (!pendingResultSent) {
+          pendingResultSent = true;
+          void sendNodeEvent(
+            client,
+            "exec.pending",
+            buildExecEventPayload({
+              sessionKey,
+              runId,
+              host: "node",
+              command: cmdText,
+              reason: "awaiting-node-approval",
+            }),
+          );
+          // Send invoke result immediately so CLI doesn't time out with generic error
+          void sendInvokeResult(client, frame, {
+            ok: false,
+            error: {
+              code: "AWAITING_NODE_APPROVAL",
+              message:
+                "Command is waiting for user approval on the node. " +
+                "Approve or deny the request in the Clawdbot app on the target device.",
+            },
+          });
+        }
+      },
+    });
+    // If we already sent the pending result, don't send another result
+    if (pendingResultSent) {
+      // The command may still complete after approval - log the final result
+      if (response?.ok) {
+        const result: ExecHostRunResult = response.payload;
+        await sendNodeEvent(
+          client,
+          "exec.finished",
+          buildExecEventPayload({
+            sessionKey,
+            runId,
+            host: "node",
+            command: cmdText,
+            exitCode: result.exitCode,
+            timedOut: result.timedOut,
+            success: result.success,
+          }),
+        );
+      }
+      return;
+    }
     if (!response) {
       if (execHostEnforced || !execHostFallbackAllowed) {
         await sendNodeEvent(
@@ -897,7 +956,35 @@ async function handleInvoke(
         return;
       }
     } else if (!response.ok) {
-      const reason = response.error.reason ?? "approval-required";
+      // Check if this is a pending/awaiting approval response
+      if ("pending" in response && response.pending) {
+        const reason = response.payload?.reason ?? "awaiting-node-approval";
+        await sendNodeEvent(
+          client,
+          "exec.pending",
+          buildExecEventPayload({
+            sessionKey,
+            runId,
+            host: "node",
+            command: cmdText,
+            reason,
+          }),
+        );
+        await sendInvokeResult(client, frame, {
+          ok: false,
+          error: {
+            code: "AWAITING_NODE_APPROVAL",
+            message:
+              reason === "approval-timeout"
+                ? "Command is waiting for user approval on the node (approval timed out)"
+                : "Command is waiting for user approval on the node",
+          },
+        });
+        return;
+      }
+      // TypeScript narrowing: at this point response must have error property
+      const errorResponse = response as { ok: false; error: { reason?: string; message: string } };
+      const reason = errorResponse.error.reason ?? "approval-required";
       await sendNodeEvent(
         client,
         "exec.denied",
@@ -911,7 +998,7 @@ async function handleInvoke(
       );
       await sendInvokeResult(client, frame, {
         ok: false,
-        error: { code: "UNAVAILABLE", message: response.error.message },
+        error: { code: "UNAVAILABLE", message: errorResponse.error.message },
       });
       return;
     } else {

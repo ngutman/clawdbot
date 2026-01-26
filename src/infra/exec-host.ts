@@ -28,26 +28,38 @@ export type ExecHostError = {
   reason?: string;
 };
 
+export type ExecHostPendingPayload = {
+  reason?: string;
+  timeoutMs?: number;
+};
+
 export type ExecHostResponse =
   | { ok: true; payload: ExecHostRunResult }
-  | { ok: false; error: ExecHostError };
+  | { ok: false; error: ExecHostError }
+  | { ok: false; pending: true; payload?: ExecHostPendingPayload };
 
 export async function requestExecHostViaSocket(params: {
   socketPath: string;
   token: string;
   request: ExecHostRequest;
   timeoutMs?: number;
+  onPending?: (payload?: ExecHostPendingPayload) => void;
 }): Promise<ExecHostResponse | null> {
-  const { socketPath, token, request } = params;
+  const { socketPath, token, request, onPending } = params;
   if (!socketPath || !token) return null;
-  const timeoutMs = params.timeoutMs ?? 20_000;
+  const baseTimeoutMs = params.timeoutMs ?? 20_000;
+  // Extended timeout when approval is pending (5 minutes)
+  const pendingTimeoutMs = 5 * 60 * 1000;
   return await new Promise((resolve) => {
     const client = new net.Socket();
     let settled = false;
     let buffer = "";
+    let pendingReceived = false;
+    let timer: ReturnType<typeof setTimeout>;
     const finish = (value: ExecHostResponse | null) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       try {
         client.destroy();
       } catch {
@@ -72,7 +84,14 @@ export async function requestExecHostViaSocket(params: {
       requestJson,
     });
 
-    const timer = setTimeout(() => finish(null), timeoutMs);
+    timer = setTimeout(() => {
+      if (pendingReceived) {
+        // Approval was pending but timed out - return pending response
+        finish({ ok: false, pending: true, payload: { reason: "approval-timeout" } });
+      } else {
+        finish(null);
+      }
+    }, baseTimeoutMs);
 
     client.on("error", () => finish(null));
     client.connect(socketPath, () => {
@@ -92,7 +111,24 @@ export async function requestExecHostViaSocket(params: {
             ok?: boolean;
             payload?: unknown;
             error?: unknown;
+            pending?: boolean;
           };
+          if (msg?.type === "exec-pending") {
+            // Approval dialog is being shown on the node
+            pendingReceived = true;
+            const pendingPayload = msg.payload as ExecHostPendingPayload | undefined;
+            // Extend timeout to allow user time to approve
+            clearTimeout(timer);
+            const extendedTimeout = pendingPayload?.timeoutMs ?? pendingTimeoutMs;
+            timer = setTimeout(() => {
+              finish({ ok: false, pending: true, payload: { reason: "approval-timeout" } });
+            }, extendedTimeout);
+            // Notify caller that approval is pending
+            if (onPending) {
+              onPending(pendingPayload);
+            }
+            continue;
+          }
           if (msg?.type === "exec-res") {
             clearTimeout(timer);
             if (msg.ok === true && msg.payload) {

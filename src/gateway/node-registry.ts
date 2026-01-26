@@ -27,6 +27,8 @@ type PendingInvoke = {
   resolve: (value: NodeInvokeResult) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  onPending?: () => void;
+  pendingNotified?: boolean;
 };
 
 export type NodeInvokeResult = {
@@ -107,6 +109,7 @@ export class NodeRegistry {
     params?: unknown;
     timeoutMs?: number;
     idempotencyKey?: string;
+    onPending?: () => void;
   }): Promise<NodeInvokeResult> {
     const node = this.nodesById.get(params.nodeId);
     if (!node) {
@@ -132,23 +135,69 @@ export class NodeRegistry {
         error: { code: "UNAVAILABLE", message: "failed to send invoke to node" },
       };
     }
-    const timeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : 30_000;
+    const baseTimeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : 30_000;
+    // Extended timeout when approval is pending (5 minutes)
+    const pendingTimeoutMs = 5 * 60 * 1000;
     return await new Promise<NodeInvokeResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingInvokes.delete(requestId);
-        resolve({
-          ok: false,
-          error: { code: "TIMEOUT", message: "node invoke timed out" },
-        });
-      }, timeoutMs);
-      this.pendingInvokes.set(requestId, {
+      const pending: PendingInvoke = {
         nodeId: params.nodeId,
         command: params.command,
         resolve,
         reject,
-        timer,
-      });
+        timer: setTimeout(() => {
+          const p = this.pendingInvokes.get(requestId);
+          this.pendingInvokes.delete(requestId);
+          resolve({
+            ok: false,
+            error: {
+              code: p?.pendingNotified ? "AWAITING_NODE_APPROVAL" : "TIMEOUT",
+              message: p?.pendingNotified
+                ? "Command is waiting for user approval on the node (timeout)"
+                : "node invoke timed out",
+            },
+          });
+        }, baseTimeoutMs),
+        onPending: params.onPending,
+        pendingNotified: false,
+      };
+      this.pendingInvokes.set(requestId, pending);
     });
+  }
+
+  /**
+   * Notify that a pending invoke is awaiting approval.
+   * Extends the timeout and notifies the caller.
+   */
+  notifyPending(requestId: string, nodeId: string): boolean {
+    const pending = this.pendingInvokes.get(requestId);
+    if (!pending) return false;
+    if (pending.nodeId !== nodeId) return false;
+    if (pending.pendingNotified) return true;
+    pending.pendingNotified = true;
+    // Extend timeout to 5 minutes for approval
+    clearTimeout(pending.timer);
+    pending.timer = setTimeout(
+      () => {
+        this.pendingInvokes.delete(requestId);
+        pending.resolve({
+          ok: false,
+          error: {
+            code: "AWAITING_NODE_APPROVAL",
+            message: "Command is waiting for user approval on the node (approval timed out)",
+          },
+        });
+      },
+      5 * 60 * 1000,
+    );
+    // Notify caller
+    if (pending.onPending) {
+      try {
+        pending.onPending();
+      } catch {
+        // ignore
+      }
+    }
+    return true;
   }
 
   handleInvokeResult(params: {
