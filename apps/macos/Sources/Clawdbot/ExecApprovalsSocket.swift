@@ -157,11 +157,19 @@ enum ExecApprovalsSocketClient {
         payload.append(0x0A)
         try handle.write(contentsOf: payload)
 
-        guard let line = try self.readLine(from: handle, maxBytes: 256_000),
-              let lineData = line.data(using: .utf8)
-        else { return nil }
-        let response = try JSONDecoder().decode(ExecApprovalSocketDecision.self, from: lineData)
-        return response.decision
+        while true {
+            guard let line = try self.readLine(from: handle, maxBytes: 256_000) else { return nil }
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, let lineData = trimmed.data(using: .utf8) else { continue }
+            if let response = try? JSONDecoder().decode(ExecApprovalSocketDecision.self, from: lineData) {
+                return response.decision
+            }
+            if let pending = try? JSONDecoder().decode(ExecPendingNotice.self, from: lineData),
+               pending.type == "exec-pending"
+            {
+                continue
+            }
+        }
     }
 
     private static func readLine(from handle: FileHandle, maxBytes: Int) throws -> String? {
@@ -196,8 +204,8 @@ final class ExecApprovalsPromptServer {
             onPrompt: { request in
                 await ExecApprovalsPromptPresenter.prompt(request)
             },
-            onExec: { request in
-                await ExecHostExecutor.handle(request)
+            onExec: { request, onPending in
+                await ExecHostExecutor.handle(request, onPending: onPending)
             })
         server.start()
         self.server = server
@@ -372,7 +380,10 @@ private enum ExecHostExecutor {
         "LD_",
     ]
 
-    static func handle(_ request: ExecHostRequest) async -> ExecHostResponse {
+    static func handle(
+        _ request: ExecHostRequest,
+        onPending: (@Sendable () -> Void)? = nil) async -> ExecHostResponse
+    {
         let command = request.command.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         guard !command.isEmpty else {
             return self.errorResponse(
@@ -405,6 +416,7 @@ private enum ExecHostExecutor {
             skillAllow: context.skillAllow),
             approvalDecision == nil
         {
+            onPending?()
             let decision = ExecApprovalsPromptPresenter.prompt(
                 ExecApprovalPromptRequest(
                     command: context.displayCommand,
@@ -593,7 +605,7 @@ private final class ExecApprovalsSocketServer: @unchecked Sendable {
     private let socketPath: String
     private let token: String
     private let onPrompt: @Sendable (ExecApprovalPromptRequest) async -> ExecApprovalDecision
-    private let onExec: @Sendable (ExecHostRequest) async -> ExecHostResponse
+    private let onExec: @Sendable (ExecHostRequest, @escaping @Sendable () -> Void) async -> ExecHostResponse
     private var socketFD: Int32 = -1
     private var acceptTask: Task<Void, Never>?
     private var isRunning = false
@@ -602,7 +614,7 @@ private final class ExecApprovalsSocketServer: @unchecked Sendable {
         socketPath: String,
         token: String,
         onPrompt: @escaping @Sendable (ExecApprovalPromptRequest) async -> ExecApprovalDecision,
-        onExec: @escaping @Sendable (ExecHostRequest) async -> ExecHostResponse)
+        onExec: @escaping @Sendable (ExecHostRequest, @escaping @Sendable () -> Void) async -> ExecHostResponse)
     {
         self.socketPath = socketPath
         self.token = token
@@ -724,6 +736,7 @@ private final class ExecApprovalsSocketServer: @unchecked Sendable {
                     try self.sendApprovalResponse(handle: handle, id: request.id, decision: .deny)
                     return
                 }
+                try self.sendExecPending(handle: handle, reason: "awaiting-approval")
                 let decision = await self.onPrompt(request.request)
                 try self.sendApprovalResponse(handle: handle, id: request.id, decision: decision)
                 return
@@ -731,7 +744,9 @@ private final class ExecApprovalsSocketServer: @unchecked Sendable {
 
             if type == "exec" {
                 let request = try JSONDecoder().decode(ExecHostSocketRequest.self, from: data)
-                let response = await self.handleExecRequest(request)
+                let response = await self.handleExecRequest(request, onPending: {
+                    try? self.sendExecPending(handle: handle, reason: "awaiting-approval")
+                })
                 try self.sendExecResponse(handle: handle, response: response)
                 return
             }
@@ -775,6 +790,14 @@ private final class ExecApprovalsSocketServer: @unchecked Sendable {
         try handle.write(contentsOf: payload)
     }
 
+    private func sendExecPending(handle: FileHandle, reason: String) throws {
+        let pending = ExecPendingNotice(reason: reason)
+        let data = try JSONEncoder().encode(pending)
+        var payload = data
+        payload.append(0x0A)
+        try handle.write(contentsOf: payload)
+    }
+
     private func isAllowedPeer(fd: Int32) -> Bool {
         var uid = uid_t(0)
         var gid = gid_t(0)
@@ -784,7 +807,10 @@ private final class ExecApprovalsSocketServer: @unchecked Sendable {
         return uid == geteuid()
     }
 
-    private func handleExecRequest(_ request: ExecHostSocketRequest) async -> ExecHostResponse {
+    private func handleExecRequest(
+        _ request: ExecHostSocketRequest,
+        onPending: @escaping @Sendable () -> Void) async -> ExecHostResponse
+    {
         let nowMs = Int(Date().timeIntervalSince1970 * 1000)
         if abs(nowMs - request.ts) > 10000 {
             return ExecHostResponse(
@@ -813,7 +839,7 @@ private final class ExecApprovalsSocketServer: @unchecked Sendable {
                 payload: nil,
                 error: ExecHostError(code: "INVALID_REQUEST", message: "invalid payload", reason: "json"))
         }
-        let response = await self.onExec(payload)
+        let response = await self.onExec(payload, onPending)
         return ExecHostResponse(
             type: "exec-res",
             id: request.id,

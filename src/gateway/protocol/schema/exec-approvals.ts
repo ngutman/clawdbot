@@ -111,3 +111,12 @@ export const ExecApprovalResolveParamsSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+
+export const ExecApprovalPendingParamsSchema = Type.Object(
+  {
+    id: Type.Optional(NonEmptyString),
+    type: Type.Literal("exec-pending"),
+    reason: NonEmptyString,
+  },
+  { additionalProperties: false },
+);

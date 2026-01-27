@@ -5,6 +5,7 @@ import {
   ErrorCodes,
   errorShape,
   formatValidationErrors,
+  validateExecApprovalPendingParams,
   validateExecApprovalRequestParams,
   validateExecApprovalResolveParams,
 } from "../protocol/index.js";
@@ -130,7 +131,23 @@ export function createExecApprovalHandlers(
         ?.handleResolved({ id: p.id, decision, resolvedBy, ts: Date.now() })
         .catch((err) => {
           context.logGateway?.error?.(`exec approvals: forward resolve failed: ${String(err)}`);
-        });
+      });
+      respond(true, { ok: true }, undefined);
+    },
+    "exec.approval.pending": async ({ params, respond }) => {
+      if (!validateExecApprovalPendingParams(params)) {
+        respond(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.INVALID_REQUEST,
+            `invalid exec.approval.pending params: ${formatValidationErrors(
+              validateExecApprovalPendingParams.errors,
+            )}`,
+          ),
+        );
+        return;
+      }
       respond(true, { ok: true }, undefined);
     },
   };

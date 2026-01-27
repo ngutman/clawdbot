@@ -670,6 +670,14 @@ actor MacNodeRuntime {
         }
 
         if requiresAsk, !approvedByAsk {
+            await self.emitExecEvent(
+                "exec.pending",
+                payload: ExecEventPayload(
+                    sessionKey: context.sessionKey,
+                    runId: context.runId,
+                    host: "node",
+                    command: context.displayCommand,
+                    reason: "awaiting-approval"))
             let decision = await MainActor.run {
                 ExecApprovalsPromptPresenter.prompt(
                     ExecApprovalPromptRequest(

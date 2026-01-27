@@ -46,6 +46,7 @@ final class ExecApprovalsGatewayPrompter {
             let data = try JSONEncoder().encode(payload)
             let request = try JSONDecoder().decode(GatewayApprovalRequest.self, from: data)
             guard self.shouldPresent(request: request) else { return }
+            await self.sendExecPending(id: request.id)
             let decision = ExecApprovalsPromptPresenter.prompt(request.request)
             try await GatewayConnection.shared.requestVoid(
                 method: .execApprovalResolve,
@@ -56,6 +57,21 @@ final class ExecApprovalsGatewayPrompter {
                 timeoutMs: 10000)
         } catch {
             self.logger.error("exec approval handling failed \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func sendExecPending(id: String) async {
+        let trimmedId = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedId.isEmpty else { return }
+        let params: [String: AnyCodable] = [
+            "id": AnyCodable(trimmedId),
+            "type": AnyCodable("exec-pending"),
+            "reason": AnyCodable("awaiting-approval"),
+        ]
+        do {
+            _ = try await GatewayConnection.shared.request(method: "exec.approval.pending", params: params, timeoutMs: 2000)
+        } catch {
+            // Best-effort only.
         }
     }
 

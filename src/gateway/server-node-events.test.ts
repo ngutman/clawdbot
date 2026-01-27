@@ -64,6 +64,24 @@ describe("node exec events", () => {
     expect(requestHeartbeatNowMock).toHaveBeenCalledWith({ reason: "exec-event" });
   });
 
+  it("enqueues exec.pending events", async () => {
+    const ctx = buildCtx();
+    await handleNodeEvent(ctx, "node-4", {
+      event: "exec.pending",
+      payloadJSON: JSON.stringify({
+        sessionKey: "agent:demo:main",
+        runId: "run-4",
+        command: "ls -la",
+      }),
+    });
+
+    expect(enqueueSystemEventMock).toHaveBeenCalledWith(
+      "Exec awaiting approval (node=node-4 id=run-4): ls -la",
+      { sessionKey: "agent:demo:main", contextKey: "exec:run-4" },
+    );
+    expect(requestHeartbeatNowMock).toHaveBeenCalledWith({ reason: "exec-event" });
+  });
+
   it("enqueues exec.finished events with output", async () => {
     const ctx = buildCtx();
     await handleNodeEvent(ctx, "node-2", {

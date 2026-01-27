@@ -413,11 +413,26 @@ export const nodeHandlers: GatewayRequestHandlers = {
         idempotencyKey: p.idempotencyKey,
       });
       if (!res.ok) {
+        const nodeError = res.error ?? null;
+        if (nodeError?.code === "AWAITING_NODE_APPROVAL") {
+          respond(
+            false,
+            undefined,
+            errorShape(
+              ErrorCodes.AWAITING_NODE_APPROVAL,
+              nodeError.message ?? "awaiting node approval",
+              {
+                details: { nodeError },
+              },
+            ),
+          );
+          return;
+        }
         respond(
           false,
           undefined,
           errorShape(ErrorCodes.UNAVAILABLE, res.error?.message ?? "node invoke failed", {
-            details: { nodeError: res.error ?? null },
+            details: { nodeError },
           }),
         );
         return;

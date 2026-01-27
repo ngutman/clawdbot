@@ -84,6 +84,16 @@ enum ExecApprovalDecision: String, Codable, Sendable {
     case deny
 }
 
+struct ExecPendingNotice: Codable, Sendable {
+    var type: String
+    var reason: String
+
+    init(reason: String) {
+        self.type = "exec-pending"
+        self.reason = reason
+    }
+}
+
 struct ExecAllowlistEntry: Codable, Hashable, Identifiable {
     var id: UUID
     var pattern: String

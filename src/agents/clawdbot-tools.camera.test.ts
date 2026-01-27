@@ -104,6 +104,7 @@ describe("nodes run", () => {
             cwd: "/tmp",
             env: { FOO: "bar" },
             timeoutMs: 12_000,
+            approvalTimeoutMs: 60_000,
           },
         });
         return {

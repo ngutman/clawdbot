@@ -84,6 +84,7 @@ const NodesToolSchema = Type.Object({
   cwd: Type.Optional(Type.String()),
   env: Type.Optional(Type.Array(Type.String())),
   commandTimeoutMs: Type.Optional(Type.Number()),
+  approvalTimeoutMs: Type.Optional(Type.Number()),
   invokeTimeoutMs: Type.Optional(Type.Number()),
   needsScreenRecording: Type.Optional(Type.Boolean()),
 });
@@ -418,26 +419,36 @@ export function createNodesTool(options?: {
               typeof params.cwd === "string" && params.cwd.trim() ? params.cwd.trim() : undefined;
             const env = parseEnvPairs(params.env);
             const commandTimeoutMs = parseTimeoutMs(params.commandTimeoutMs);
-            const invokeTimeoutMs = parseTimeoutMs(params.invokeTimeoutMs);
+            const approvalTimeoutMs = parseTimeoutMs(params.approvalTimeoutMs) ?? 60_000;
+            let invokeTimeoutMs = parseTimeoutMs(params.invokeTimeoutMs);
+            if (invokeTimeoutMs === undefined) {
+              const baseTimeoutMs = Math.max(commandTimeoutMs ?? 0, approvalTimeoutMs);
+              invokeTimeoutMs = baseTimeoutMs + 5_000;
+            }
             const needsScreenRecording =
               typeof params.needsScreenRecording === "boolean"
                 ? params.needsScreenRecording
                 : undefined;
-            const raw = (await callGatewayTool("node.invoke", gatewayOpts, {
-              nodeId,
-              command: "system.run",
-              params: {
-                command,
-                cwd,
-                env,
-                timeoutMs: commandTimeoutMs,
-                needsScreenRecording,
-                agentId,
-                sessionKey,
+            const raw = (await callGatewayTool(
+              "node.invoke",
+              { ...gatewayOpts, timeoutMs: invokeTimeoutMs },
+              {
+                nodeId,
+                command: "system.run",
+                params: {
+                  command,
+                  cwd,
+                  env,
+                  timeoutMs: commandTimeoutMs,
+                  approvalTimeoutMs,
+                  needsScreenRecording,
+                  agentId,
+                  sessionKey,
+                },
+                timeoutMs: invokeTimeoutMs,
+                idempotencyKey: crypto.randomUUID(),
               },
-              timeoutMs: invokeTimeoutMs,
-              idempotencyKey: crypto.randomUUID(),
-            })) as { payload?: unknown };
+            )) as { payload?: unknown };
             return jsonResult(raw?.payload ?? {});
           }
           default:

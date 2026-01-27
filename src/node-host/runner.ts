@@ -58,6 +58,7 @@ type SystemRunParams = {
   cwd?: string | null;
   env?: Record<string, string>;
   timeoutMs?: number | null;
+  approvalTimeoutMs?: number | null;
   needsScreenRecording?: boolean | null;
   agentId?: string | null;
   sessionKey?: string | null;
@@ -459,12 +460,16 @@ function buildExecEventPayload(payload: ExecEventPayload): ExecEventPayload {
 async function runViaMacAppExecHost(params: {
   approvals: ReturnType<typeof resolveExecApprovals>;
   request: ExecHostRequest;
+  onPending?: (reason: string) => void;
+  timeoutMs?: number;
 }): Promise<ExecHostResponse | null> {
-  const { approvals, request } = params;
+  const { approvals, request, onPending, timeoutMs } = params;
   return await requestExecHostViaSocket({
     socketPath: approvals.socketPath,
     token: approvals.token,
     request,
+    onPending,
+    timeoutMs,
   });
 }
 
@@ -817,6 +822,10 @@ async function handleInvoke(
   const autoAllowSkills = approvals.agent.autoAllowSkills;
   const sessionKey = params.sessionKey?.trim() || "node";
   const runId = params.runId?.trim() || crypto.randomUUID();
+  const approvalTimeoutMs =
+    typeof params.approvalTimeoutMs === "number" && Number.isFinite(params.approvalTimeoutMs)
+      ? Math.max(1, Math.floor(params.approvalTimeoutMs))
+      : 60_000;
   const env = sanitizeEnv(params.env ?? undefined);
   const safeBins = resolveSafeBins(agentExec?.safeBins ?? cfg.tools?.exec?.safeBins);
   const bins = autoAllowSkills ? await skillBins.current() : new Set<string>();
@@ -873,9 +882,30 @@ async function handleInvoke(
       sessionKey: sessionKey ?? null,
       approvalDecision,
     };
-    const response = await runViaMacAppExecHost({ approvals, request: execRequest });
+    let pendingSeen = false;
+    const response = await runViaMacAppExecHost({
+      approvals,
+      request: execRequest,
+      timeoutMs: approvalTimeoutMs,
+      onPending: (reason) => {
+        if (pendingSeen) return;
+        pendingSeen = true;
+        void sendNodeEvent(
+          client,
+          "exec.pending",
+          buildExecEventPayload({
+            sessionKey,
+            runId,
+            host: "node",
+            command: cmdText,
+            reason,
+          }),
+        );
+      },
+    });
     if (!response) {
       if (execHostEnforced || !execHostFallbackAllowed) {
+        const reason = pendingSeen ? "approval-timeout" : "companion-unavailable";
         await sendNodeEvent(
           client,
           "exec.denied",
@@ -884,7 +914,7 @@ async function handleInvoke(
             runId,
             host: "node",
             command: cmdText,
-            reason: "companion-unavailable",
+            reason,
           }),
         );
         await sendInvokeResult(client, frame, {

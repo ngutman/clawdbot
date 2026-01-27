@@ -37,6 +37,7 @@ export async function requestExecHostViaSocket(params: {
   token: string;
   request: ExecHostRequest;
   timeoutMs?: number;
+  onPending?: (reason: string) => void;
 }): Promise<ExecHostResponse | null> {
   const { socketPath, token, request } = params;
   if (!socketPath || !token) return null;
@@ -92,6 +93,7 @@ export async function requestExecHostViaSocket(params: {
             ok?: boolean;
             payload?: unknown;
             error?: unknown;
+            reason?: unknown;
           };
           if (msg?.type === "exec-res") {
             clearTimeout(timer);
@@ -105,6 +107,12 @@ export async function requestExecHostViaSocket(params: {
             }
             finish(null);
             return;
+          }
+          if (msg?.type === "exec-pending") {
+            const rawReason = typeof msg.reason === "string" ? msg.reason : "";
+            const reason = rawReason.trim() || "awaiting-approval";
+            params.onPending?.(reason);
+            continue;
           }
         } catch {
           // ignore

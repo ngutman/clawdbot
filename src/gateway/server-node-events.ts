@@ -171,6 +171,7 @@ export const handleNodeEvent = async (ctx: NodeEventContext, nodeId: string, evt
       return;
     }
     case "exec.started":
+    case "exec.pending":
     case "exec.finished":
     case "exec.denied": {
       if (!evt.payloadJSON) return;
@@ -198,6 +199,9 @@ export const handleNodeEvent = async (ctx: NodeEventContext, nodeId: string, evt
       let text = "";
       if (evt.event === "exec.started") {
         text = `Exec started (node=${nodeId}${runId ? ` id=${runId}` : ""})`;
+        if (command) text += `: ${command}`;
+      } else if (evt.event === "exec.pending") {
+        text = `Exec awaiting approval (node=${nodeId}${runId ? ` id=${runId}` : ""})`;
         if (command) text += `: ${command}`;
       } else if (evt.event === "exec.finished") {
         const exitLabel = timedOut ? "timeout" : `code ${exitCode ?? "?"}`;
